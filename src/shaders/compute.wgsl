@@ -51,6 +51,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let time = sim.v0.y;
   let horizon = sim.v1.y;
   let binaryBlend = sim.v1.w;
+  let asteroidChaos = sim.v5.w;
 
   let bhA = sim.v3.xy;
   let massA = sim.v3.z;
@@ -60,21 +61,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var a = gravityAccel(pos, bhA, massA);
   a += gravityAccel(pos, bhB, massB) * binaryBlend;
 
+  // Level 2+ asteroid lane pressure: asteroids pick up mild orbital shear/jitter.
+  if (kind < 0.5 && asteroidChaos > 0.001) {
+    let shear = normalize(vec2<f32>(-(pos.y - bhA.y), pos.x - bhA.x));
+    let jitter = hash(f32(index) * 0.173 + time * 0.71) * 2.0 - 1.0;
+    vel += shear * asteroidChaos * 0.24 * dt;
+    vel += normalize(pos - bhA) * jitter * asteroidChaos * 0.1 * dt;
+  }
+
   // Mild drag keeps trajectories from exploding numerically over long sessions.
   vel = (vel + a * dt) * (1.0 - min(0.12 * dt, 0.08));
   pos = pos + vel * dt;
 
   let shipPos = sim.v2.xy;
   let shipRadius = sim.v2.z;
-  let collisionScale = sim.v2.w;
   let deltaShip = pos - shipPos;
   let shipDist = length(deltaShip);
-  if (shipDist < shipRadius + radius) {
+  let collisionRadius = radius * select(0.26, 0.18, kind > 0.5);
+  if (shipDist < shipRadius + collisionRadius) {
     atomicAdd(&stats.collisionCount, 1u);
     // Bounce and damp when hitting the ship to make impact visible.
     let n = normalize(select(vec2<f32>(0.0, 1.0), deltaShip, shipDist > 0.0001));
     vel = reflect(vel, n) * 0.5;
-    pos = shipPos + n * (shipRadius + radius + 0.002);
+    pos = shipPos + n * (shipRadius + collisionRadius + 0.0012);
   }
 
   let toA = pos - bhA;
@@ -88,13 +97,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (minDist < horizon || outOfBounds) {
     let seed = f32(index) + time * (13.0 + kind * 3.17);
     let angle = hash(seed) * 6.283185307;
-    let spawnR = sim.v1.x + 0.12 + hash(seed + 3.1) * 0.85;
+    let spawnBase = mix(0.12, 0.05, asteroidChaos);
+    let spawnRange = mix(0.85, 0.55, asteroidChaos);
+    let spawnR = sim.v1.x + spawnBase + hash(seed + 3.1) * spawnRange;
     let side = select(-1.0, 1.0, hash(seed + 9.2) > 0.5);
     let anchor = mix(bhA, bhB, binaryBlend * step(0.5, hash(seed + 7.3)));
 
     pos = anchor + vec2<f32>(cos(angle), sin(angle)) * spawnR * vec2<f32>(1.0, side);
     let tangent = normalize(vec2<f32>(-(pos.y - anchor.y), pos.x - anchor.x));
-    vel = tangent * (0.35 + hash(seed + 4.7) * 0.9);
+    vel = tangent * (0.35 + hash(seed + 4.7) * (0.9 + asteroidChaos * 0.5));
 
     if (kind > 0.5) {
       // Radiation particles jitter faster and are smaller.

@@ -10,6 +10,7 @@ const WORLD_HALF_Y = 1.0;
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+const LEVEL_OBJECTIVE_TARGETS = [0, 60, 140, 260, 420, 620];
 
 interface BlackHole {
   x: number;
@@ -81,11 +82,16 @@ class Game {
   private hull = 100;
   private score = 0;
   private elapsed = 0;
+  private levelObjective = 0;
+  private objectiveRate = 0;
 
   private level = 1;
   private binaryBlend = 0;
   private radiationIntensity = 0;
+  private asteroidChaos = 0;
   private collisionPending = false;
+  private awaitingLevelChoice = false;
+  private recentHitTimer = 0;
 
   private bhA: BlackHole = { x: 0, y: 0, mass: 0.052 };
   private bhB: BlackHole = { x: 0.45, y: 0, mass: 0.04 };
@@ -144,7 +150,7 @@ class Game {
       const speed = 0.35 + Math.random() * 0.95;
       const tx = -Math.sin(angle) * speed;
       const ty = Math.cos(angle) * speed;
-      const radius = kind ? 0.004 + Math.random() * 0.005 : 0.006 + Math.random() * 0.01;
+      const radius = kind ? 0.003 + Math.random() * 0.004 : 0.0038 + Math.random() * 0.0062;
 
       const o = i * particleStride;
       particleData[o + 0] = x;
@@ -331,10 +337,15 @@ class Game {
     this.hull = 100;
     this.score = 0;
     this.elapsed = 0;
+    this.levelObjective = 0;
+    this.objectiveRate = 0;
     this.level = 1;
     this.binaryBlend = 0;
     this.radiationIntensity = 0;
+    this.asteroidChaos = 0;
     this.gameOver = false;
+    this.awaitingLevelChoice = false;
+    this.recentHitTimer = 0;
     this.lastTime = 0;
 
     this.renderStartOverlay();
@@ -347,10 +358,18 @@ class Game {
     return clamp((this.iscoRadius - d) / (this.iscoRadius - this.horizonRadius), 0, 1);
   }
 
-  private updateDifficulty(dt: number): void {
-    this.level = clamp(Math.floor(this.elapsed / 35) + 1, 1, 5);
+  private updateDifficulty(dt: number): boolean {
+    const targetForLevel = LEVEL_OBJECTIVE_TARGETS[this.level];
+    const targetLevel = this.level < 5 && this.levelObjective >= targetForLevel ? this.level + 1 : this.level;
+    if (targetLevel > this.level) {
+      const completedLevel = this.level;
+      this.level = targetLevel;
+      this.showLevelPassOverlay(completedLevel, targetLevel);
+      return true;
+    }
 
     this.radiationIntensity = this.level >= 3 ? clamp((this.level - 2) * 0.45, 0, 1.25) : 0;
+    this.asteroidChaos = this.level >= 2 ? clamp(0.35 + (this.level - 2) * 0.25, 0, 1.0) : 0;
 
     if (this.level >= 4) {
       this.bhA.mass = 0.052 + (this.elapsed - 105) * 0.0001;
@@ -368,24 +387,29 @@ class Game {
       this.bhB.x = 0.45;
       this.bhB.y = 0;
     }
+
+    return false;
   }
 
   private updateShip(dt: number): void {
+    this.recentHitTimer = Math.max(0, this.recentHitTimer - dt);
+
     const ax = Number(this.input.right) - Number(this.input.left);
     const ay = Number(this.input.up) - Number(this.input.down);
     const mag = Math.hypot(ax, ay);
     const boost = this.input.boost && this.fuel > 0;
+    const preDanger = this.computeDanger();
 
     let thrustX = 0;
     let thrustY = 0;
 
     if (mag > 0.0001 && this.fuel > 0) {
-      const thrustPower = boost ? 1.7 : 1.0;
+      const thrustPower = (boost ? 1.8 : 1.05) * (1 + preDanger * 0.65);
       thrustX = (ax / mag) * thrustPower;
       thrustY = (ay / mag) * thrustPower;
       this.shipHeading = Math.atan2(thrustY, thrustX) - Math.PI / 2;
 
-      const baseBurn = boost ? 10.8 : 5.2;
+      const baseBurn = (boost ? 11.5 : 5.0) * (1 + preDanger * 0.75 + (boost ? 0.25 : 0));
       this.fuel = Math.max(0, this.fuel - baseBurn * dt);
     }
 
@@ -395,8 +419,9 @@ class Game {
     const radiationPulse = this.level >= 3 ? Math.max(0, Math.sin(this.elapsed * 1.8 + this.level)) * this.radiationIntensity : 0;
     const radiationDrain = radiationPulse * (this.level >= 4 ? 2.2 : 1.1);
 
-    this.shipVel.x += (thrustX * 0.8 + gravA.x + gravB.x) * dt;
-    this.shipVel.y += (thrustY * 0.8 + gravA.y + gravB.y) * dt;
+    const thrustAuthority = 0.95 + preDanger * 0.9;
+    this.shipVel.x += (thrustX * thrustAuthority + gravA.x + gravB.x) * dt;
+    this.shipVel.y += (thrustY * thrustAuthority + gravA.y + gravB.y) * dt;
     this.shipVel.x *= 1 - Math.min(0.1 * dt, 0.06);
     this.shipVel.y *= 1 - Math.min(0.1 * dt, 0.06);
 
@@ -405,11 +430,29 @@ class Game {
 
     this.fuel = Math.max(0, this.fuel - radiationDrain * dt);
 
-    const danger = this.computeDanger();
-    this.score += dt * (6 + danger * 26 + this.binaryBlend * 18);
-
     const dA = Math.hypot(this.shipPos.x - this.bhA.x, this.shipPos.y - this.bhA.y);
     const dB = Math.hypot(this.shipPos.x - this.bhB.x, this.shipPos.y - this.bhB.y);
+    const closest = Math.min(dA, this.binaryBlend > 0.5 ? dB : Number.POSITIVE_INFINITY);
+    const danger = this.computeDanger();
+    this.score += dt * (1.5 + danger * 30 + this.binaryBlend * 22);
+
+    // Risk/reward progression:
+    // far orbit gives almost no objective gain; danger-zone maneuvering pays heavily.
+    const maneuvering = mag > 0.0001 ? (boost ? 0.45 : 0.2) : 0;
+    const iscoProximity = clamp((0.62 - closest) / 0.34, 0, 1);
+    const riskCurve = iscoProximity * iscoProximity;
+    const pilotBonus = maneuvering * (0.4 + iscoProximity * 1.4 + danger * 1.8);
+    const binaryBonus = this.binaryBlend * (0.25 + danger * 0.6);
+    const objectivePerSecond =
+      0.03 +
+      iscoProximity * 0.5 +
+      riskCurve * 2.2 +
+      danger * 3.0 +
+      pilotBonus +
+      binaryBonus;
+    this.objectiveRate = objectivePerSecond;
+    this.levelObjective += objectivePerSecond * dt;
+
     if (dA < this.horizonRadius || (this.binaryBlend > 0.45 && dB < this.horizonRadius * 0.95)) {
       this.hull = 0;
     }
@@ -420,6 +463,12 @@ class Game {
 
     if (Math.abs(this.shipPos.x) > WORLD_HALF_X * 1.1 || Math.abs(this.shipPos.y) > WORLD_HALF_Y * 1.1) {
       this.hull -= dt * 26;
+    }
+
+    // Reward cleaner flying: once collisions stop briefly, hull recovers slowly.
+    if (this.recentHitTimer <= 0 && this.hull > 0) {
+      const regenRate = Math.max(0.08, 0.42 - danger * 0.24);
+      this.hull = Math.min(100, this.hull + regenRate * dt);
     }
   }
 
@@ -439,7 +488,7 @@ class Game {
     sim.set([this.shipPos.x, this.shipPos.y, this.shipRadius, 0.18 + this.level * 0.16], 8);
     sim.set([this.bhA.x, this.bhA.y, this.bhA.mass * 4.4, 0], 12);
     sim.set([this.bhB.x, this.bhB.y, this.bhB.mass * 4.4, 0], 16);
-    sim.set([WORLD_HALF_X, WORLD_HALF_Y, this.radiationIntensity, 0], 20);
+    sim.set([WORLD_HALF_X, WORLD_HALF_Y, this.radiationIntensity, this.asteroidChaos], 20);
     this.device.queue.writeBuffer(this.simUniformBuffer, 0, sim);
 
     const ship = new Float32Array(8);
@@ -468,7 +517,11 @@ class Game {
     this.lastTime = t;
     this.elapsed += dt;
 
-    this.updateDifficulty(dt);
+    const pausedForLevelPrompt = this.updateDifficulty(dt);
+    if (pausedForLevelPrompt) {
+      this.drawHud();
+      return;
+    }
     this.updateShip(dt);
     this.uploadUniforms(dt);
 
@@ -525,7 +578,11 @@ class Game {
 
         if (hits > 0) {
           const danger = this.computeDanger();
-          this.hull = Math.max(0, this.hull - hits * (0.01 + danger * 0.028));
+          this.recentHitTimer = 0.8;
+          const pressure = Math.sqrt(Math.min(hits, 36));
+          const chipDamage = pressure * (0.002 + danger * 0.006);
+          const frameCap = 0.09 + danger * 0.14;
+          this.hull = Math.max(0, this.hull - Math.min(frameCap, chipDamage));
         }
       }).catch(() => {
         this.collisionPending = false;
@@ -545,8 +602,12 @@ class Game {
     const closest = Math.min(dA, this.binaryBlend > 0.5 ? dB : Number.POSITIVE_INFINITY);
     const zone = closest > this.iscoRadius ? 'Stable Orbit' : closest > this.horizonRadius ? 'ISCO Danger Zone' : 'EVENT HORIZON';
 
+    const objectiveTarget = LEVEL_OBJECTIVE_TARGETS[this.level];
+    const objectivePct = clamp((this.levelObjective / objectiveTarget) * 100, 0, 100);
     this.hud.textContent = [
       `Level: ${this.level} / 5`,
+      `Objective: ${this.levelObjective.toFixed(0)} / ${objectiveTarget} (${objectivePct.toFixed(0)}%)`,
+      `Objective Rate: ${this.objectiveRate.toFixed(2)} /s`,
       `Fuel: ${this.fuel.toFixed(1)}%`,
       `Hull: ${Math.max(this.hull, 0).toFixed(1)}%`,
       `Score: ${Math.floor(this.score)}`,
@@ -595,6 +656,45 @@ class Game {
       this.running = true;
       this.overlay.classList.add('hidden');
     });
+  }
+
+  private showLevelPassOverlay(completedLevel: number, enteredLevel: number): void {
+    if (this.awaitingLevelChoice || completedLevel >= 5) {
+      return;
+    }
+
+    this.awaitingLevelChoice = true;
+    this.running = false;
+    this.levelObjective = 0;
+    this.overlay.classList.remove('hidden');
+    this.overlay.innerHTML = `
+      <h1>Level ${completedLevel} Cleared</h1>
+      <p>You passed Level ${completedLevel}. Enter Level ${enteredLevel}?</p>
+      <p>Score: <strong>${Math.floor(this.score)}</strong> | Hull: <strong>${Math.max(this.hull, 0).toFixed(1)}%</strong></p>
+      <div style="display:flex; gap:10px; margin-top: 10px;">
+        <button id="continue-btn">Continue</button>
+        <button id="exit-btn" style="background: linear-gradient(135deg, #ffd7a1, #ff8b8b);">Exit</button>
+      </div>
+    `;
+
+    const continueBtn = this.overlay.querySelector<HTMLButtonElement>('#continue-btn');
+    const exitBtn = this.overlay.querySelector<HTMLButtonElement>('#exit-btn');
+
+    if (continueBtn) {
+      continueBtn.addEventListener('click', () => {
+        this.awaitingLevelChoice = false;
+        this.running = true;
+        this.overlay.classList.add('hidden');
+      });
+    }
+
+    if (exitBtn) {
+      exitBtn.addEventListener('click', () => {
+        this.awaitingLevelChoice = false;
+        this.running = false;
+        this.reset();
+      });
+    }
   }
 }
 
