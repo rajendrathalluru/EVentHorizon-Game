@@ -1,6 +1,7 @@
 struct ShipParams {
   data0: vec4<f32>, // x, y, heading, radius
   data1: vec4<f32>, // worldHalfX, worldHalfY, danger, fuel01
+  data2: vec4<f32>, // thrust01, boost01, reserved, reserved
 };
 
 struct VSOut {
@@ -8,6 +9,8 @@ struct VSOut {
   @location(0) local: vec2<f32>,
   @location(1) danger: f32,
   @location(2) fuel: f32,
+  @location(3) thrust: f32,
+  @location(4) boost: f32,
 };
 
 @group(0) @binding(0) var<uniform> ship: ShipParams;
@@ -15,12 +18,12 @@ struct VSOut {
 @vertex
 fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VSOut {
   let corners = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0),
-    vec2<f32>(1.0, -1.0),
-    vec2<f32>(-1.0, 1.0),
-    vec2<f32>(-1.0, 1.0),
-    vec2<f32>(1.0, -1.0),
-    vec2<f32>(1.0, 1.0)
+    vec2<f32>(-1.15, -1.15),
+    vec2<f32>(1.15, -1.15),
+    vec2<f32>(-1.15, 1.85),
+    vec2<f32>(-1.15, 1.85),
+    vec2<f32>(1.15, -1.15),
+    vec2<f32>(1.15, 1.85)
   );
 
   let angle = ship.data0.z;
@@ -29,7 +32,7 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VSOut {
   let rot = mat2x2<f32>(vec2<f32>(c, s), vec2<f32>(-s, c));
 
   let local = corners[vertexIndex];
-  let scale = vec2<f32>(ship.data0.w * 1.25, ship.data0.w * 1.95);
+  let scale = vec2<f32>(ship.data0.w * 1.25, ship.data0.w * 2.05);
   let p = rot * (local * scale) + ship.data0.xy;
 
   var out: VSOut;
@@ -37,6 +40,8 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VSOut {
   out.local = local;
   out.danger = ship.data1.z;
   out.fuel = ship.data1.w;
+  out.thrust = ship.data2.x;
+  out.boost = ship.data2.y;
   return out;
 }
 
@@ -64,9 +69,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   d = min(d, wingL);
   d = min(d, wingR);
   let inside = 1.0 - smoothstep(0.0, 0.03, d);
-  if (inside < 0.01) {
-    discard;
-  }
 
   let panelLines = smoothstep(0.015, 0.0, abs(p.x) - 0.22) * smoothstep(0.65, -0.1, p.y);
   let safeColor = vec3<f32>(0.45, 0.95, 0.8);
@@ -79,13 +81,30 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let engineMask = 1.0 - smoothstep(0.0, 0.08, engine);
   let engineColor = mix(vec3<f32>(0.2, 0.5, 1.0), vec3<f32>(0.8, 0.95, 1.0), in.fuel) * (1.0 + 0.6 * in.fuel);
 
+  let plumeLen = mix(0.45, 1.05, in.thrust);
+  let plumeWidth = mix(0.08, 0.2, in.boost);
+  let plumeShape = vec2<f32>(p.x / plumeWidth, (p.y - (0.95 + plumeLen * 0.48)) / plumeLen);
+  let plumeCore = exp(-pow(plumeShape.x, 2.0) * 3.4) * exp(-pow(max(0.0, plumeShape.y), 2.0) * 2.6);
+  let plumeMask = plumeCore * step(0.86, p.y) * in.thrust;
+  let plumeColor = mix(
+    vec3<f32>(0.3, 0.75, 1.0),
+    vec3<f32>(1.0, 0.62, 0.2),
+    clamp(in.boost * 0.8 + plumeShape.y * 0.35, 0.0, 1.0)
+  );
+  let plumeFlicker = 0.82 + 0.18 * sin((p.x * 27.0 + p.y * 13.0) * (1.0 + in.boost));
+
   var color = hullColor * (0.35 + 0.65 * inside);
   color += vec3<f32>(0.08, 0.1, 0.14) * panelLines;
   color = mix(color, cockpitColor, cockpitMask * 0.9);
   color += engineColor * engineMask * 0.9;
+  color += plumeColor * plumeMask * (1.45 + in.boost * 1.25) * plumeFlicker;
 
   let rim = 1.0 - smoothstep(0.0, 0.08, abs(d));
   color += mix(vec3<f32>(0.1, 0.25, 0.35), dangerColor, in.danger) * rim * 0.25;
 
-  return vec4<f32>(color, inside);
+  let alpha = max(inside, plumeMask * 0.92);
+  if (alpha < 0.01) {
+    discard;
+  }
+  return vec4<f32>(color, alpha);
 }
